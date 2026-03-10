@@ -28,7 +28,9 @@ CREATE TABLE actionable_tasks (
     task_name     TEXT NOT NULL,
     status        TEXT DEFAULT 'active', -- active, completed, discarded
     due_date      TEXT,
-    urgency       TEXT,                  -- quick, small, medium, large
+    priority      TEXT DEFAULT 'normal', -- low, normal, high, critical
+    effort_estimate TEXT,                -- quick, small, medium, large
+    parent_task_id  INTEGER REFERENCES actionable_tasks(id) ON DELETE CASCADE,
     metadata_json TEXT DEFAULT '{}',     -- 其他所有长尾扩展数据以 JSON 存入
     created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -57,7 +59,16 @@ def init_db():
     cursor = conn.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='raw_logs'")
     if cursor.fetchone()[0] == 0:
         conn.executescript(SCHEMA_V1)
-        conn.commit()
+    else:
+        # Migration for adding priority and renaming urgency to effort_estimate
+        cursor = conn.execute("PRAGMA table_info(actionable_tasks)")
+        columns = [row['name'] for row in cursor.fetchall()]
+        if 'urgency' in columns:
+            conn.execute("ALTER TABLE actionable_tasks RENAME COLUMN urgency TO effort_estimate")
+            conn.execute("ALTER TABLE actionable_tasks ADD COLUMN priority TEXT DEFAULT 'normal'")
+        if 'parent_task_id' not in columns:
+            conn.execute("ALTER TABLE actionable_tasks ADD COLUMN parent_task_id INTEGER REFERENCES actionable_tasks(id) ON DELETE CASCADE")
+    conn.commit()
     conn.close()
 
 # ---------------------------------------------------------------------------
@@ -75,7 +86,7 @@ def record_thought_or_fact(raw_thought_string: str, ai_summary: Optional[str] = 
     conn.close()
     return {"log_id": log_id, "status": "recorded"}
 
-def add_actionable_task(task_name: str, raw_user_quote: str, due_date: Optional[str] = None, urgency_level: Optional[str] = None) -> dict:
+def add_actionable_task(task_name: str, raw_user_quote: str, due_date: Optional[str] = None, priority: str = 'normal', effort_estimate: Optional[str] = None, parent_task_id: Optional[int] = None) -> dict:
     conn = get_connection()
     
     # 无论如何，用户的原话先必须且强制地进入“轨一”
@@ -88,9 +99,9 @@ def add_actionable_task(task_name: str, raw_user_quote: str, due_date: Optional[
     # 创建给 AI 当下消费用的业务数据
     cursor = conn.execute(
         """INSERT INTO actionable_tasks 
-        (log_id, task_name, due_date, urgency) 
-        VALUES (?, ?, ?, ?)""",
-        (log_id, task_name, due_date, urgency_level)
+        (log_id, task_name, due_date, priority, effort_estimate, parent_task_id) 
+        VALUES (?, ?, ?, ?, ?, ?)""",
+        (log_id, task_name, due_date, priority, effort_estimate, parent_task_id)
     )
     task_id = cursor.lastrowid
     conn.commit()
@@ -116,6 +127,33 @@ def update_task_status(task_id: int, new_status: str, reason_for_change: Optiona
     conn.execute(
         "INSERT INTO task_updates (task_id, new_status, reason) VALUES (?, ?, ?)",
         (task_id, new_status, reason_for_change)
+    )
+    conn.commit()
+    
+    row = conn.execute("SELECT * FROM actionable_tasks WHERE id = ?", (task_id,)).fetchone()
+    conn.close()
+    return dict(row)
+
+def add_task_metadata(task_id: int, new_metadata: dict) -> dict:
+    conn = get_connection()
+    task = conn.execute("SELECT metadata_json FROM actionable_tasks WHERE id = ?", (task_id,)).fetchone()
+    
+    if not task:
+        conn.close()
+        return {"error": f"Task ID {task_id} not found."}
+        
+    current_metadata_str = task["metadata_json"] or "{}"
+    try:
+        current_metadata = json.loads(current_metadata_str)
+    except json.JSONDecodeError:
+        current_metadata = {}
+        
+    current_metadata.update(new_metadata)
+    updated_metadata_str = json.dumps(current_metadata, ensure_ascii=False)
+    
+    conn.execute(
+        "UPDATE actionable_tasks SET metadata_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (updated_metadata_str, task_id)
     )
     conn.commit()
     
@@ -150,29 +188,33 @@ def suggest_next_actions(available_time_minutes: Optional[int] = None) -> list[d
     conn = get_connection()
     
     # 获取所有的未完成活动
-    sql = "SELECT id, task_name, due_date, urgency FROM actionable_tasks WHERE status = 'active'"
+    sql = "SELECT id, task_name, due_date, priority, effort_estimate, parent_task_id FROM actionable_tasks WHERE status = 'active'"
     tasks = conn.execute(sql).fetchall()
     conn.close()
     
     results = []
     for t in tasks:
         task = dict(t)
-        urg = (task.get("urgency") or "").lower()
+        priority = (task.get("priority") or "normal").lower()
+        effort = (task.get("effort_estimate") or "").lower()
         score = 0
         
-        if urg == "quick":
-            score += 10
-        elif urg == "small":
-            score += 5
+        if priority == "critical": score += 20
+        elif priority == "high": score += 10
+        elif priority == "low": score -= 5
+        
+        if effort == "quick": score += 5
+        elif effort == "small": score += 2
             
         # 如果用户说了当前只有 10 分钟闲时间，那么过滤掉 large 的任务
         if isinstance(available_time_minutes, int):
-            if available_time_minutes <= 15 and urg in ["medium", "large"]:
+            if available_time_minutes <= 15 and effort in ["medium", "large"]:
                 continue
-            if available_time_minutes <= 30 and urg == "large":
+            if available_time_minutes <= 30 and effort == "large":
                 continue
                 
-        # 基于紧急度等简单的算法打个分，再返还给 AI，避免 AI 的认知负荷太重
+        task['suggestion_score'] = score
         results.append(task)
         
+    results.sort(key=lambda x: x['suggestion_score'], reverse=True)
     return results
