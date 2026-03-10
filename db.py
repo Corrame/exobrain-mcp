@@ -197,6 +197,63 @@ def add_task_metadata(task_id: int, new_metadata: dict) -> dict:
     return dict(row)
 
 # ---------------------------------------------------------------------------
+# LLM Re-ranking (Pass 3 — intent-level relevance filter)
+# ---------------------------------------------------------------------------
+
+def _rerank_with_llm(query: str, candidates: list[dict], top_n: int = 5) -> list[dict]:
+    """Use Claude Haiku to filter candidates by query intent, not just keyword presence.
+
+    Solves the case where a keyword appears in an unrelated document (e.g., 'milk'
+    used as an example in a design doc). Returns only candidates where the content
+    is actually about what the user is asking.
+    """
+    if not candidates:
+        return []
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return candidates[:top_n]
+
+    try:
+        import re
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=api_key)
+        items_text = "\n".join(
+            f"[{i}] {c['raw_text'][:400]}"
+            for i, c in enumerate(candidates)
+        )
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f'Query: "{query}"\n\n'
+                    f'Rate each item\'s relevance to the query intent. '
+                    f'1.0 = directly about what the user is asking. '
+                    f'0.0 = keyword appears but the text is not actually about this topic.\n'
+                    f'Return ONLY a JSON array of floats, one per item, no explanation.\n\n'
+                    f'{items_text}'
+                ),
+            }],
+        )
+        text = response.content[0].text.strip()
+        match = re.search(r'\[[\d\s.,]+\]', text)
+        if not match:
+            return candidates[:top_n]
+
+        scores = json.loads(match.group())
+        for i, c in enumerate(candidates):
+            c["rerank_score"] = float(scores[i]) if i < len(scores) else 0.0
+
+        relevant = [c for c in candidates if c.get("rerank_score", 0) >= 0.4]
+        return sorted(relevant, key=lambda x: x["rerank_score"], reverse=True)[:top_n]
+
+    except Exception:
+        return candidates[:top_n]  # Graceful degradation
+
+
+# ---------------------------------------------------------------------------
 # Read Tools
 # ---------------------------------------------------------------------------
 
@@ -245,8 +302,9 @@ def recall_past_mentions_of(keyword: str, limit: int = 15) -> dict:
                 pass  # Graceful degradation: return LIKE results only
 
     merged = sorted(raw_found.values(), key=lambda r: r.get("semantic_score", 0), reverse=True)
+    reranked = _rerank_with_llm(keyword, merged[:limit])
     return {
-        "raw_logs_found": merged[:limit],
+        "raw_logs_found": reranked,
         "structured_tasks_found": task_found,
     }
 
