@@ -1,7 +1,7 @@
 import json
 from mcp.server.fastmcp import FastMCP
 import db
-from typing import Optional
+from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
 # Server Configuration (Personal AI Cognitive Exobrain)
@@ -33,7 +33,7 @@ POLICY:
 """,
 )
 
-def _json(obj) -> str:
+def _json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, default=str)
 
 # ---------------------------------------------------------------------------
