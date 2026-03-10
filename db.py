@@ -4,6 +4,25 @@ import json
 from datetime import datetime
 from typing import Optional
 
+# ---------------------------------------------------------------------------
+# Optional semantic search (lazy-loaded on first use)
+# ---------------------------------------------------------------------------
+_embedding_model = None
+
+def _get_embedding_model():
+    """Return the cached embedding model (loaded at startup via init_db)."""
+    return _embedding_model
+
+def _load_embedding_model():
+    """Eagerly load the multilingual sentence embedding model."""
+    global _embedding_model
+    try:
+        from sentence_transformers import SentenceTransformer
+        # paraphrase-multilingual-MiniLM-L12-v2: 100MB, CPU-friendly, strong Chinese support
+        _embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+    except Exception:
+        _embedding_model = None  # Graceful degradation: fall back to LIKE search only
+
 DB_PATH = os.environ.get(
     "MEMORY_DB_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "exobrain.db")
@@ -70,6 +89,8 @@ def init_db():
             conn.execute("ALTER TABLE actionable_tasks ADD COLUMN parent_task_id INTEGER REFERENCES actionable_tasks(id) ON DELETE CASCADE")
     conn.commit()
     conn.close()
+    # Eagerly pre-load the embedding model so the first search has no cold-start delay
+    _load_embedding_model()
 
 # ---------------------------------------------------------------------------
 # Core Operations for MCP Tools
@@ -165,22 +186,50 @@ def recall_past_mentions_of(keyword: str, limit: int = 15) -> dict:
     conn = get_connection()
     like_pattern = f"%{keyword}%"
     
-    # 搜索轨一（原始记录绝对真理）
+    # --- Pass 1: Exact LIKE search ---
     raw_results = conn.execute(
         "SELECT id, raw_text, created_at FROM raw_logs WHERE raw_text LIKE ? OR ai_summary LIKE ? ORDER BY created_at DESC LIMIT ?",
         (like_pattern, like_pattern, limit)
     ).fetchall()
-    
-    # 搜索轨二（结构化任务记录）
     task_results = conn.execute(
         "SELECT id, task_name, status, due_date FROM actionable_tasks WHERE task_name LIKE ? ORDER BY created_at DESC LIMIT ?",
         (like_pattern, limit)
     ).fetchall()
-    
+
+    raw_found = {r["id"]: dict(r) for r in raw_results}  # id -> record dict
+    task_found = [dict(r) for r in task_results]
+
+    # --- Pass 2: Semantic vector search (always runs, adds to results) ---
+    model = _get_embedding_model()
+    if model is not None:
+        try:
+            import numpy as np
+            all_rows = conn.execute(
+                "SELECT id, raw_text, created_at FROM raw_logs ORDER BY created_at DESC"
+            ).fetchall()
+            
+            if all_rows:
+                texts = [r["raw_text"] for r in all_rows]
+                query_vec = model.encode([keyword], normalize_embeddings=True)[0]
+                doc_vecs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+                scores = np.dot(doc_vecs, query_vec)
+                top_indices = np.argsort(scores)[::-1][:limit]
+                
+                for idx in top_indices:
+                    if scores[idx] > 0.35:
+                        row = dict(all_rows[idx])
+                        row["semantic_score"] = float(scores[idx])
+                        # Merge into raw_found (LIKE results get overwritten with score enrichment)
+                        raw_found[row["id"]] = {**raw_found.get(row["id"], row), "semantic_score": float(scores[idx])}
+        except Exception:
+            pass  # Graceful degradation on any failure
+
     conn.close()
+    # Sort final merged results by semantic score (desc), fallback to recency
+    merged = sorted(raw_found.values(), key=lambda r: r.get("semantic_score", 0), reverse=True)
     return {
-        "raw_logs_found": [dict(r) for r in raw_results],
-        "structured_tasks_found": [dict(r) for r in task_results]
+        "raw_logs_found": merged[:limit],
+        "structured_tasks_found": task_found
     }
 
 def suggest_next_actions(available_time_minutes: Optional[int] = None) -> list[dict]:
