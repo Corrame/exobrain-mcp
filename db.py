@@ -99,7 +99,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )
 
 def init_db() -> None:
-    """Initialize the database schema and pre-load the embedding model."""
+    """Initialize the database schema and run any pending migrations."""
     with get_connection() as conn:
         cursor = conn.execute(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='raw_logs'"
@@ -109,7 +109,9 @@ def init_db() -> None:
         else:
             _migrate_schema(conn)
         conn.commit()
-    # Load the embedding model after the DB connection is safely closed
+
+def load_models() -> None:
+    """Pre-load ML models into memory. Call once at server startup."""
     _load_embedding_model()
 
 # ---------------------------------------------------------------------------

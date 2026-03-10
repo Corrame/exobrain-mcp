@@ -149,4 +149,5 @@ def suggest_next_actions(available_time_minutes: Optional[int] = None) -> str:
 
 if __name__ == "__main__":
     db.init_db()
+    db.load_models()
     mcp.run()
