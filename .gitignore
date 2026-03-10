@@ -1,0 +1,23 @@
+# Database files (Private Personal Exobrain Data)
+*.db
+*.sqlite
+*.sqlite3
+
+# Python overrides
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# MCP Host logs / configs (if any stray files)
+*.log
+mcp_config.json
