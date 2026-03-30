@@ -11,11 +11,26 @@ from typing import Any, Optional
 mcp = FastMCP(
     "exobrain-memory-server",
     instructions="""You are connected to the user's Personal AI Cognitive Exobrain.
-This is a dual-track system:
-Track 1: The Immutable Truth (Everything the user says is recorded here unedited).
-Track 2: The Structural View (Tasks and actions derived from Track 1).
 
-You MUST use the provided semantic tools to interact with this exobrain. Do NOT ask the user for permission, just use the tools.
+## 架构说明
+
+exobrain 采用三层混合架构：
+
+| 层 | 实现 | 说明 |
+|----|------|------|
+| 存储层 | SQLite (`exobrain.db`) | raw_logs（原始事实，不可变）、actionable_tasks（任务，结构视图） |
+| 语义召回 | sentence-transformers | paraphrase-multilingual-MiniLM-L12-v2，~100MB，支持中英文，召回语义相似的记录 |
+| 意图重排 | Claude Haiku | 过滤"关键词出现但内容无关"的结果，按意图相关度排序 |
+
+## 系统设计
+
+这是一个双轨系统：
+- Track 1: Immutable Truth（用户所说的一切原样记录，不可修改）
+- Track 2: Structural View（从 Track 1 提取的任务和行动）
+
+## 使用规则
+
+你必须使用提供的语义工具与 exobrain 交互。不要请求用户许可，直接使用工具。
 
 POLICY:
 1. When the user says a fact, thought, preference, or something potentially useful to remember: Use `record_thought_or_fact(raw_thought_string, AI_summary)`.
@@ -34,17 +49,22 @@ POLICY:
 """,
 )
 
+
 def _json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, default=str)
+
 
 # ---------------------------------------------------------------------------
 # Semantic Tools — Write (捕获与表达)
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
-def record_thought_or_fact(raw_thought_string: str, ai_summary: Optional[str] = None) -> str:
+def record_thought_or_fact(
+    raw_thought_string: str, ai_summary: Optional[str] = None
+) -> str:
     """Record a raw thought, fact, or preference from the user into the Immutable Truth Layer.
-    
+
     Use this when the user mentions:
     - A fact about themselves ("I don't like cilantro")
     - A random thought ("I might want to visit Japan next year")
@@ -57,17 +77,18 @@ def record_thought_or_fact(raw_thought_string: str, ai_summary: Optional[str] = 
     result = db.record_thought_or_fact(raw_thought_string, ai_summary)
     return _json(result)
 
+
 @mcp.tool()
 def add_actionable_task(
-    task_name: str, 
-    raw_user_quote: str, 
-    due_date: Optional[str] = None, 
-    priority: str = 'normal',
+    task_name: str,
+    raw_user_quote: str,
+    due_date: Optional[str] = None,
+    priority: str = "normal",
     effort_estimate: Optional[str] = None,
-    parent_task_id: Optional[int] = None
+    parent_task_id: Optional[int] = None,
 ) -> str:
     """Create a new actionable task in the Structural View.
-    
+
     Use this when the user needs to get something done (e.g., "Remind me to buy milk", "I need to file taxes by March").
 
     Args:
@@ -78,13 +99,18 @@ def add_actionable_task(
         effort_estimate: Optional. Estimated effort: 'quick', 'small', 'medium', 'large'.
         parent_task_id: Optional. The ID of the parent task, if this is a subtask of a project.
     """
-    result = db.add_actionable_task(task_name, raw_user_quote, due_date, priority, effort_estimate, parent_task_id)
+    result = db.add_actionable_task(
+        task_name, raw_user_quote, due_date, priority, effort_estimate, parent_task_id
+    )
     return _json(result)
 
+
 @mcp.tool()
-def update_task_status(task_id: int, new_status: str, reason_for_change: Optional[str] = None) -> str:
+def update_task_status(
+    task_id: int, new_status: str, reason_for_change: Optional[str] = None
+) -> str:
     """Update the status of an existing task.
-    
+
     Use this when the user says they finished something or changed their mind about a task.
 
     Args:
@@ -95,13 +121,14 @@ def update_task_status(task_id: int, new_status: str, reason_for_change: Optiona
     result = db.update_task_status(task_id, new_status, reason_for_change)
     return _json(result)
 
+
 @mcp.tool()
 def add_task_metadata(task_id: int, tags_json_string: str) -> str:
     """Add or update dynamic metadata tags for a specific task.
-    
+
     Use this to attach unstructured data like location, context, links, or specific attributes.
     This acts as an escape hatch for fields that don't exist in the formal schema.
-    
+
     Args:
         task_id: The ID of the task.
         tags_json_string: A JSON string representing a dictionary of key-value pairs to add or update (e.g., '{"location": "supermarket", "category": "shopping"}').
@@ -109,21 +136,27 @@ def add_task_metadata(task_id: int, tags_json_string: str) -> str:
     try:
         tags = json.loads(tags_json_string)
         if not isinstance(tags, dict):
-            return _json({"error": "tags_json_string must represent a valid JSON object (dictionary)."})
+            return _json(
+                {
+                    "error": "tags_json_string must represent a valid JSON object (dictionary)."
+                }
+            )
     except json.JSONDecodeError:
         return _json({"error": "Failed to parse tags_json_string. Must be valid JSON."})
-        
+
     result = db.add_task_metadata(task_id, tags)
     return _json(result)
+
 
 # ---------------------------------------------------------------------------
 # Semantic Tools — Read (动态检索)
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
 def recall_past_mentions_of(concept_or_keyword: str) -> str:
     """Search the exobrain for past mentions of a keyword or concept.
-    
+
     Use this when the user refers to past conversations, or asks if they mentioned something before.
 
     Args:
@@ -132,10 +165,11 @@ def recall_past_mentions_of(concept_or_keyword: str) -> str:
     result = db.recall_past_mentions_of(concept_or_keyword)
     return _json(result)
 
+
 @mcp.tool()
 def suggest_next_actions(available_time_minutes: Optional[int] = None) -> str:
     """Get a list of suggested tasks for the user to work on.
-    
+
     Use this when the user asks "What should I do now?" or has free time.
 
     Args:
@@ -143,6 +177,7 @@ def suggest_next_actions(available_time_minutes: Optional[int] = None) -> str:
     """
     result = db.suggest_next_actions(available_time_minutes)
     return _json({"suggestions": result})
+
 
 # ---------------------------------------------------------------------------
 # Entry point
