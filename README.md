@@ -124,9 +124,85 @@ Score = Importance × (Activation_Count^0.3) × Time_Decay × (Base + Arousal² 
 
 ---
 
-## 📂 数据隐私
+## 📂 数据存储与备份策略
 
-你的个人数据（`exobrain.db`）存储在本地，且已被 `.gitignore` 永久屏蔽，不会被推送至任何远端仓库。
+### 踩坑经验：代码公开 vs 数据私密
+
+本项目是一个**开源项目**（代码公开），但你的记忆数据（`exobrain.db`）是**极度私密的**。
+
+**问题场景：**
+> 你想 fork 这个项目改进代码并贡献回社区，但你的数据库里存着"昨天和 AI 聊的情感问题"、"明天的待办清单"、"你的个人偏好"...
+
+**错误做法：**
+- 把数据库提交到公开仓库 → 隐私泄露
+- 把本地路径硬编码进代码 → 换机器失效
+
+**正确做法：**
+
+#### 方案 1：快速开始（单机使用）
+```bash
+git clone https://github.com/Corrame/exobrain-mcp.git
+cd exobrain-mcp
+# 直接运行，数据库自动创建在项目目录下
+# .gitignore 已屏蔽 *.db，不会误提交
+```
+
+**适合：** 试用、数据不敏感、单机使用
+
+#### 方案 2：生产部署（代码与数据分离）
+**推荐用于长期使用、多设备同步、数据备份需求**
+
+1. **Fork 公开仓库**（用于代码贡献和改进）
+   ```bash
+   git clone https://github.com/<你的账号>/exobrain-mcp.git
+   ```
+
+2. **创建私有仓库**（仅用于备份数据）
+   ```bash
+   # 在 GitHub 上新建私有仓库，例如：my-exobrain-data
+   git clone https://github.com/<你的账号>/my-exobrain-data.git
+   ```
+
+3. **配置数据路径**
+   
+   复制 `.env.example` 为 `.env`：
+   ```bash
+   cp .env.example .env
+   ```
+   
+   编辑 `.env` 文件：
+   ```env
+   MEMORY_DB_PATH=/path/to/my-exobrain-data/exobrain.db
+   ```
+   
+   或者在启动时设置环境变量：
+   ```powershell
+   # Windows
+   $env:MEMORY_DB_PATH="C:\Users\<用户名>\Documents\my-exobrain-data\exobrain.db"
+   
+   # Linux/Mac
+   export MEMORY_DB_PATH="/home/<用户名>/my-exobrain-data/exobrain.db"
+   ```
+
+4. **启动服务**
+   ```bash
+   python server.py
+   # 数据库现在存储在私有仓库目录下
+   ```
+
+**架构说明：**
+- `exobrain-mcp/` —— 公开仓库，存放代码，随时可以 pull 上游更新
+- `my-exobrain-data/` —— 私有仓库，存放 `exobrain.db` 和配置文件
+- `.env` —— 本地配置文件（已被 `.gitignore` 保护，不会提交）
+
+**备份策略：**
+```bash
+# 定期提交数据变更
+cd my-exobrain-data
+git add exobrain.db
+git commit -m "backup: $(date)"
+git push origin main
+```
 
 ---
 
