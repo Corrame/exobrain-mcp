@@ -1,8 +1,13 @@
 import json
 import threading
+import os
+import anthropic
 from mcp.server.fastmcp import FastMCP
 import db
 from typing import Any, Optional
+from emotion_engine import EmotionEngine
+
+emotion_engine = EmotionEngine()
 
 # ---------------------------------------------------------------------------
 # Server Configuration (Personal AI Cognitive Exobrain)
@@ -46,6 +51,9 @@ POLICY:
 5. When the user asks "Did I mention X?", "What was my plan for Y?": Use `recall_past_mentions_of(concept_or_keyword)`.
    
 6. When the user asks "What should I do now?", "I'm bored": Use `suggest_next_actions(available_time_minutes)`.
+
+7. MANDATORY PROTOCOL: When the user greets you or a new conversation starts, YOU MUST FIRST calling `check_active_emotions()`.
+   This pulls the top 3 high-arousal memories floating in the user's subconscious. If there are heavy unresolved emotions, gently and naturally ask about them. Do not act like a robot running a script.
 """,
 )
 
@@ -60,7 +68,7 @@ def _json(obj: Any) -> str:
 
 
 @mcp.tool()
-def record_thought_or_fact(
+async def record_thought_or_fact(
     raw_thought_string: str, ai_summary: Optional[str] = None
 ) -> str:
     """Record a raw thought, fact, or preference from the user into the Immutable Truth Layer.
@@ -74,7 +82,29 @@ def record_thought_or_fact(
         raw_thought_string: The EXACT, verbatim quote from the user. Do not edit it.
         ai_summary: Optional. Your short summary or interpretation of the quote.
     """
-    result = db.record_thought_or_fact(raw_thought_string, ai_summary)
+    domain, valence, arousal = None, 0.5, 0.3
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if api_key:
+        try:
+            client = anthropic.AsyncAnthropic(api_key=api_key)
+            emotion_data = await emotion_engine.analyze_emotion_api(
+                client=client, 
+                model="claude-haiku-4-5-20251001", 
+                content=raw_thought_string
+            )
+            domain = ",".join(emotion_data.get("domain", []))
+            valence = emotion_data.get("valence", 0.5)
+            arousal = emotion_data.get("arousal", 0.3)
+        except Exception:
+            pass
+
+    result = db.record_thought_or_fact(
+        raw_thought_string, 
+        ai_summary, 
+        domain=domain, 
+        valence=valence, 
+        arousal=arousal
+    )
     return _json(result)
 
 
@@ -178,6 +208,15 @@ def suggest_next_actions(available_time_minutes: Optional[int] = None) -> str:
     result = db.suggest_next_actions(available_time_minutes)
     return _json({"suggestions": result})
 
+@mcp.tool()
+def check_active_emotions() -> str:
+    """Check the user's subconscious to see what high-arousal memories are heavily weighting on their mind today.
+    
+    You MUST call this when the user first says hello or starts a new session.
+    Use the result to empathetically guide the conversation if there are unresolved tensions or extreme joys.
+    """
+    result = db.check_active_emotions()
+    return _json({"active_subtext": result})
 
 # ---------------------------------------------------------------------------
 # Entry point

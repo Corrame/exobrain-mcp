@@ -88,4 +88,17 @@
 
 ---
 
+## 🙏 致谢 / Acknowledgments
+
+本项目在设计和实现过程中参考并整合了以下开源项目的优秀思想：
+
+- **[Ombre-Brain](https://github.com/P0lar1zzZ/Ombre-Brain)** by P0lar1zzZ (MIT License)
+  - 情感坐标体系（Valence/Arousal）的概念与应用
+  - 基于艾宾浩斯遗忘曲线的记忆衰减算法
+  - 高唤醒度记忆权重加成机制
+  
+  上述概念经适配后应用于本项目的 `emotion_engine.py` 模块，为记忆系统赋予了情绪感知和自然遗忘的能力。
+
+---
+
 **从普通的 LLM 到通用人工智能 (AGI)，系统需要数字灵魂的缓存。祝你和你的 AI 合作愉快！**
