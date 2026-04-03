@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "local-personal-memory": {
+      "command": "C:\\Users\\qq147\\Documents\\opencode_workspace\\exobrain-mcp\\.venv\\Scripts\\python.exe",
+      "args": [
+        "C:\\Users\\qq147\\Documents\\opencode_workspace\\exobrain-mcp\\server.py"
+      ]
+    }
+  }
+}
