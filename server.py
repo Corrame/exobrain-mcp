@@ -38,8 +38,9 @@ exobrain 采用三层混合架构：
 你必须使用提供的语义工具与 exobrain 交互。不要请求用户许可，直接使用工具。
 
 POLICY:
-1. When the user says a fact, thought, preference, or something potentially useful to remember: Use `record_thought_or_fact(raw_thought_string, AI_summary)`.
-   Always pass the EXACT user quote to `raw_thought_string`.
+1. STORE EVERYTHING: When the user says ANYTHING - facts, thoughts, feelings, opinions, random musings, or even things that seem trivial - Use `record_thought_or_fact(raw_thought_string, AI_summary)`.
+   Storage is cheap. Recall is expensive. Let the decay engine handle filtering later. 
+   Always pass the EXACT user quote to `raw_thought_string`. Do not ask for permission. Do not filter. Just store.
    
 2. When the user asks you to remind them of something, or explicitly assigns a task to do: Use `add_actionable_task(task_name, raw_user_quote, due_date, priority, effort_estimate, parent_task_id)`.
    Always pass the EXACT user quote. Keep `task_name` short. Use `parent_task_id` if the task is a sub-step of a larger project.
@@ -88,9 +89,9 @@ async def record_thought_or_fact(
         try:
             client = anthropic.AsyncAnthropic(api_key=api_key)
             emotion_data = await emotion_engine.analyze_emotion_api(
-                client=client, 
-                model="claude-haiku-4-5-20251001", 
-                content=raw_thought_string
+                client=client,
+                model="claude-haiku-4-5-20251001",
+                content=raw_thought_string,
             )
             domain = ",".join(emotion_data.get("domain", []))
             valence = emotion_data.get("valence", 0.5)
@@ -99,11 +100,7 @@ async def record_thought_or_fact(
             pass
 
     result = db.record_thought_or_fact(
-        raw_thought_string, 
-        ai_summary, 
-        domain=domain, 
-        valence=valence, 
-        arousal=arousal
+        raw_thought_string, ai_summary, domain=domain, valence=valence, arousal=arousal
     )
     return _json(result)
 
@@ -208,15 +205,17 @@ def suggest_next_actions(available_time_minutes: Optional[int] = None) -> str:
     result = db.suggest_next_actions(available_time_minutes)
     return _json({"suggestions": result})
 
+
 @mcp.tool()
 def check_active_emotions() -> str:
     """Check the user's subconscious to see what high-arousal memories are heavily weighting on their mind today.
-    
+
     You MUST call this when the user first says hello or starts a new session.
     Use the result to empathetically guide the conversation if there are unresolved tensions or extreme joys.
     """
     result = db.check_active_emotions()
     return _json({"active_subtext": result})
+
 
 # ---------------------------------------------------------------------------
 # Entry point
