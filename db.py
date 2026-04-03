@@ -468,3 +468,45 @@ def suggest_next_actions(available_time_minutes: Optional[int] = None) -> list[d
 
     results.sort(key=lambda x: x["suggestion_score"], reverse=True)
     return results
+
+
+# ---------------------------------------------------------------------------
+# Schema Introspection (for Agentic use)
+# ---------------------------------------------------------------------------
+
+
+def get_schema_info() -> dict:
+    """Expose database schema for agents who want to write custom SQL."""
+    with get_connection() as conn:
+        # Get all tables
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+        tables = cursor.fetchall()
+
+        schema = {}
+        for table in tables:
+            table_name = table[0]
+            # Get columns for each table
+            cursor = conn.execute(f"PRAGMA table_info({table_name})")
+            columns = [
+                {
+                    "name": row[1],
+                    "type": row[2],
+                    "nullable": not row[3],
+                    "default": row[4],
+                }
+                for row in cursor.fetchall()
+            ]
+
+            # Get row count
+            cursor = conn.execute(f"SELECT COUNT(*) FROM {table_name}")
+            count = cursor.fetchone()[0]
+
+            schema[table_name] = {"columns": columns, "row_count": count}
+
+    return {
+        "database_path": DB_PATH,
+        "tables": schema,
+        "note": "This database is yours. You can read/write directly via SQLite if needed. For deletions, write your own SQL.",
+    }

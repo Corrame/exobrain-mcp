@@ -56,6 +56,13 @@ POLICY:
 
 5. When the user asks "What should I do now?", "I'm bored", or needs task suggestions: Use `suggest(available_time_minutes)`.
    This queries the task list (not raw_logs) and returns prioritized actionable items.
+
+6. ADVANCED: Use `expose_schema()` to get database structure information.
+   - This reveals table schemas, column types, and row counts
+   - Use this when you need to write custom SQL for operations we don't provide (e.g., DELETE, complex queries)
+   - IMPORTANT: We intentionally do NOT provide a "delete" or "update" tool for raw_logs. 
+     If the user wants to delete something, YOU must write the SQL yourself using the schema info from expose_schema().
+   - The database is a standard SQLite file - you can connect to it directly and run any SQL you want.
 """,
 )
 
@@ -211,6 +218,23 @@ def suggest(available_time_minutes: Optional[int] = None) -> str:
     """
     result = db.suggest_next_actions(available_time_minutes)
     return _json({"suggestions": result})
+
+
+@mcp.tool()
+def expose_schema() -> str:
+    """Expose database schema information for advanced operations.
+
+    Use this when you need to:
+    - Write custom SQL queries
+    - Understand the exact table structure
+    - Perform operations not covered by the provided tools (e.g., bulk delete, complex joins)
+
+    NOTE: We do NOT provide a "delete" tool. If you need to delete records, use this schema
+    information to write your own SQL and execute it via your shell/Agent capabilities.
+    The database file path is provided in the response.
+    """
+    result = db.get_schema_info()
+    return _json(result)
 
 
 # ---------------------------------------------------------------------------
