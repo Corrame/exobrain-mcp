@@ -1,8 +1,35 @@
 import json
 import threading
 import os
+import sys
+import logging
+from datetime import datetime
+from dotenv import load_dotenv
 import anthropic
 from mcp.server.fastmcp import FastMCP
+
+# ---------------------------------------------------------------------------
+# Logging Setup
+# ---------------------------------------------------------------------------
+log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"exobrain_{datetime.now().strftime('%Y%m%d')}.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(log_file, encoding="utf-8"),
+        logging.StreamHandler(sys.stderr),
+    ],
+)
+logger = logging.getLogger("exobrain")
+logger.info("=== MCP Server Starting ===")
+
+# Load environment variables from .env file before importing db
+load_dotenv()
+logger.info(f"MEMORY_DB_PATH: {os.environ.get('MEMORY_DB_PATH', 'not set')}")
+
 import db
 from typing import Any, Optional
 from emotion_engine import EmotionEngine
@@ -177,24 +204,51 @@ def update_task(
 
 
 @mcp.tool()
-def recall(query: Optional[str] = None, scope: str = "user", limit: int = 10) -> str:
+def recall(
+    query: Optional[str] = None,
+    scope: str = "user",
+    limit: int = 10,
+    semantic: bool = True,
+    time_days: Optional[int] = None,
+    min_arousal: Optional[float] = None,
+    min_valence: Optional[float] = None,
+    semantic_threshold: float = 0.50,
+    use_decay: bool = True,
+) -> str:
     """Search the exobrain or surface high-priority memories.
 
     Use this when the user refers to past conversations, asks about previous mentions,
-    or when you need context. If query is empty, automatically surfaces Top 3 high-arousal memories.
+    or when you need context. Supports flexible filtering for precise control.
 
     Args:
         query: Keywords or phrases to search for. If None or empty, returns high-arousal memories.
         scope: "user" (default, search only user records) or "all" (include assistant records).
         limit: Maximum number of results to return. Defaults to 10.
+        semantic: Whether to include semantic (vector) search results. Default True.
+        time_days: If set, only search records from last N days (e.g., 7 for past week).
+        min_arousal: If set (0.0-1.0), filter records with arousal >= threshold (high emotion).
+        min_valence: If set (0.0-1.0), filter records with valence >= threshold (positive).
+        semantic_threshold: Minimum semantic similarity score (0.0-1.0, default 0.50).
+            Based on BGE-M3 testing: ≥0.51 catches cross-language synonyms (server↔服务器, 主机),
+            ≤0.45 filters noise (host/milk/test). Use 0.40 for exploration, 0.55 for strict matching.
+        use_decay: Whether to apply Ebbinghaus decay weighting. Default True.
     """
     if not query:
         # Surface high-arousal memories (Top 3)
         result = db.check_active_emotions()
         return _json({"active_memories": result, "mode": "emotion_surfacing"})
     else:
-        # Regular search
-        result = db.recall_past_mentions_of(query)
+        # Regular search with flexible parameters
+        result = db.recall_past_mentions_of(
+            query,
+            limit=limit,
+            semantic=semantic,
+            time_days=time_days,
+            min_arousal=min_arousal,
+            min_valence=min_valence,
+            semantic_threshold=semantic_threshold,
+            use_decay=use_decay,
+        )
         # Filter by scope if needed
         if scope == "user" and "raw_logs_found" in result:
             result["raw_logs_found"] = [
@@ -243,5 +297,16 @@ def expose_schema() -> str:
 
 if __name__ == "__main__":
     db.init_db()
-    threading.Thread(target=db.load_models, daemon=True).start()
+    logger.info("Initializing database...")
+
+    # Load models synchronously - embedding is core functionality
+    logger.info("Loading ML models (this may take a moment)...")
+    db.load_models()
+
+    model = db._get_embedding_model()
+    if model is None:
+        logger.warning("Model failed to load. Server will run with LIKE-only search.")
+    else:
+        logger.info("Server ready with full embedding support.")
+
     mcp.run()

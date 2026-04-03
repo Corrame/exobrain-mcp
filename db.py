@@ -23,12 +23,26 @@ def _load_embedding_model() -> None:
     Called once at startup. Fails silently: falls back to LIKE-only search.
     """
     global _embedding_model
+    import logging
+
+    logger = logging.getLogger("exobrain")
+
     try:
         from sentence_transformers import SentenceTransformer
+        import torch
 
-        # paraphrase-multilingual-MiniLM-L12-v2: ~100MB, CPU-friendly, strong Chinese/multilingual support
-        _embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
-    except Exception:
+        logger.info("Loading embedding model: BAAI/bge-m3")
+        logger.info(f"CUDA available: {torch.cuda.is_available()}")
+
+        # BGE-M3: Multi-Lingual, Multi-Functionality, Multi-Granularity
+        # ~500MB, supports 100+ languages including Chinese technical terms
+        # 1024-dim dense embeddings via sentence-transformers
+        _embedding_model = SentenceTransformer("BAAI/bge-m3")
+
+        dim = _embedding_model.get_sentence_embedding_dimension()
+        logger.info(f"Model loaded successfully. Dimension: {dim}")
+    except Exception as e:
+        logger.error(f"Failed to load embedding model: {e}")
         _embedding_model = None  # Graceful degradation: fall back to LIKE search only
 
 
@@ -130,6 +144,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE raw_logs ADD COLUMN last_active_at DATETIME")
         conn.execute("UPDATE raw_logs SET last_active_at = created_at")
 
+    # Inject embedding columns for pre-computed vectors
+    if "embedding" not in log_columns:
+        # BLOB to store float32 array (1024 dims * 4 bytes = 4096 bytes for BGE-M3)
+        conn.execute("ALTER TABLE raw_logs ADD COLUMN embedding BLOB")
+        conn.execute("ALTER TABLE raw_logs ADD COLUMN embedding_model TEXT")
+        conn.execute("ALTER TABLE raw_logs ADD COLUMN embedding_dim INTEGER")
+
 
 def init_db() -> None:
     """Initialize the database schema and run any pending migrations."""
@@ -146,7 +167,35 @@ def init_db() -> None:
 
 def load_models() -> None:
     """Pre-load ML models into memory. Call once at server startup."""
+    import logging
+
+    logger = logging.getLogger("exobrain")
+    logger.info("load_models() started")
     _load_embedding_model()
+    model = _get_embedding_model()
+    if model is not None:
+        logger.info("load_models() completed successfully")
+    else:
+        logger.error("load_models() failed - model is None")
+
+
+def _get_current_model_info() -> tuple[str, int]:
+    """Get the current embedding model name and dimension.
+    Returns: (model_name, embedding_dim)
+    """
+    model = _get_embedding_model()
+    if model is None:
+        return ("none", 0)
+    # For sentence-transformers, extract model name from model object
+    model_name = getattr(model, "model_name", None)
+    if model_name is None:
+        # Try to get from the underlying transformer model
+        try:
+            model_name = model[0].auto_model.config._name_or_path
+        except:
+            model_name = "unknown"
+    dim = model.get_sentence_embedding_dimension()
+    return (model_name, dim)
 
 
 # ---------------------------------------------------------------------------
@@ -161,10 +210,46 @@ def record_thought_or_fact(
     valence: float = 0.5,
     arousal: float = 0.3,
 ) -> dict:
+    import logging
+
+    logger = logging.getLogger("exobrain")
+
+    model = _get_embedding_model()
+    model_name, embedding_dim = _get_current_model_info()
+    logger.info(
+        f"record_thought_or_fact: model={model_name}, dim={embedding_dim}, model_obj={model is not None}"
+    )
+
+    # Pre-compute embedding if model is available
+    embedding_blob = None
+    if model is not None:
+        try:
+            import numpy as np
+
+            vec = model.encode([raw_thought_string], normalize_embeddings=True)[0]
+            embedding_blob = vec.astype(np.float32).tobytes()
+            logger.info(
+                f"Embedding computed: shape={vec.shape}, bytes={len(embedding_blob)}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to compute embedding: {e}")
+            embedding_blob = None
+    else:
+        logger.warning("Model not available, skipping embedding computation")
+
     with get_connection() as conn:
         cursor = conn.execute(
-            "INSERT INTO raw_logs (raw_text, ai_summary, domain, valence, arousal) VALUES (?, ?, ?, ?, ?)",
-            (raw_thought_string, ai_summary, domain, valence, arousal),
+            "INSERT INTO raw_logs (raw_text, ai_summary, domain, valence, arousal, embedding, embedding_model, embedding_dim) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                raw_thought_string,
+                ai_summary,
+                domain,
+                valence,
+                arousal,
+                embedding_blob,
+                model_name,
+                embedding_dim,
+            ),
         )
         log_id = cursor.lastrowid
         conn.commit()
@@ -333,17 +418,60 @@ def _rerank_with_llm(query: str, candidates: list[dict], top_n: int = 5) -> list
 # ---------------------------------------------------------------------------
 
 
-def recall_past_mentions_of(keyword: str, limit: int = 15) -> dict:
+def recall_past_mentions_of(
+    keyword: str,
+    limit: int = 15,
+    semantic: bool = True,
+    time_days: Optional[int] = None,
+    min_arousal: Optional[float] = None,
+    min_valence: Optional[float] = None,
+    semantic_threshold: float = 0.50,
+    use_decay: bool = True,
+) -> dict:
+    """
+    Recall past mentions with flexible filtering.
+
+    Args:
+        keyword: Search keyword or phrase
+        limit: Maximum results to return
+        semantic: Whether to include semantic (vector) search results
+        time_days: If set, only search records from last N days
+        min_arousal: If set (0.0-1.0), filter records with arousal >= threshold
+        min_valence: If set (0.0-1.0), filter records with valence >= threshold
+        semantic_threshold: Minimum semantic similarity score (0.0-1.0, default 0.50)
+        use_decay: Whether to apply Ebbinghaus decay weighting to final scores
+    """
     like_pattern = f"%{keyword}%"
+
+    # Build WHERE clause for time filtering
+    where_conditions = []
+    params = []
+
+    if time_days is not None:
+        where_conditions.append(f"created_at >= datetime('now', '-{time_days} days')")
+
+    if min_arousal is not None:
+        where_conditions.append(f"arousal >= {min_arousal}")
+
+    if min_valence is not None:
+        where_conditions.append(f"valence >= {min_valence}")
+
+    where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
 
     with get_connection() as conn:
         # Pass 1: Fast exact LIKE search
+        like_sql = f"""
+            SELECT id, raw_text, created_at, domain, valence, arousal, activation_count, last_active_at 
+            FROM raw_logs 
+            {where_clause}
+            {"AND" if where_conditions else "WHERE"} (raw_text LIKE ? OR ai_summary LIKE ?)
+            ORDER BY created_at DESC LIMIT ?
+        """.strip()
+
         raw_results = conn.execute(
-            "SELECT id, raw_text, created_at, domain, valence, arousal, activation_count, last_active_at FROM raw_logs "
-            "WHERE raw_text LIKE ? OR ai_summary LIKE ? "
-            "ORDER BY created_at DESC LIMIT ?",
-            (like_pattern, like_pattern, limit),
+            like_sql, (like_pattern, like_pattern, limit)
         ).fetchall()
+
         task_results = conn.execute(
             "SELECT id, task_name, status, due_date FROM actionable_tasks "
             "WHERE task_name LIKE ? ORDER BY created_at DESC LIMIT ?",
@@ -353,46 +481,104 @@ def recall_past_mentions_of(keyword: str, limit: int = 15) -> dict:
         raw_found = {r["id"]: dict(r) for r in raw_results}
         task_found = [dict(r) for r in task_results]
 
-        # Pass 2: Semantic vector search (always runs alongside LIKE)
-        model = _get_embedding_model()
-        if model is not None:
-            try:
-                import numpy as np
+        # Pass 2: Semantic vector search (optional)
+        if semantic:
+            model = _get_embedding_model()
+            current_model_name, current_dim = _get_current_model_info()
+            if model is not None:
+                try:
+                    import numpy as np
 
-                all_rows = conn.execute(
-                    "SELECT id, raw_text, created_at, domain, valence, arousal, activation_count, last_active_at FROM raw_logs ORDER BY created_at DESC"
-                ).fetchall()
-                if all_rows:
-                    texts = [r["raw_text"] for r in all_rows]
-                    query_vec = model.encode([keyword], normalize_embeddings=True)[0]
-                    doc_vecs = model.encode(
-                        texts, normalize_embeddings=True, show_progress_bar=False
-                    )
-                    scores = np.dot(doc_vecs, query_vec)
-                    for idx in np.argsort(scores)[::-1][
-                        : limit * 2
-                    ]:  # pull slightly more to rerank
-                        score = float(scores[idx])
-                        if score > 0.35:
-                            row = dict(all_rows[idx])
-                            # Enrich existing LIKE results or add new semantic-only hits
-                            raw_found[row["id"]] = {
-                                **raw_found.get(row["id"], row),
-                                "semantic_score": score,
-                            }
-            except Exception:
-                pass  # Graceful degradation: return LIKE results only
+                    # Build SQL with same filters for semantic search
+                    semantic_where = where_clause
 
-        # Pass 2.5: Apply Ebbinghaus decay and Emotion weighting
+                    all_rows = conn.execute(
+                        f"""
+                        SELECT id, raw_text, embedding, embedding_model, embedding_dim, 
+                               created_at, domain, valence, arousal, activation_count, last_active_at 
+                        FROM raw_logs 
+                        {semantic_where}
+                        ORDER BY created_at DESC
+                        """
+                    ).fetchall()
+
+                    if all_rows:
+                        # Encode query once
+                        query_vec = model.encode([keyword], normalize_embeddings=True)[
+                            0
+                        ]
+
+                        # Build document vectors
+                        doc_vecs = []
+                        valid_rows = []
+
+                        for row in all_rows:
+                            row_dict = dict(row)
+                            embedding_blob = row_dict.get("embedding")
+                            stored_model = row_dict.get("embedding_model")
+                            stored_dim = row_dict.get("embedding_dim")
+
+                            vec = None
+                            if (
+                                embedding_blob is not None
+                                and stored_model == current_model_name
+                                and stored_dim == current_dim
+                            ):
+                                vec = np.frombuffer(embedding_blob, dtype=np.float32)
+                            else:
+                                # Re-encode and update
+                                try:
+                                    vec = model.encode(
+                                        [row_dict["raw_text"]],
+                                        normalize_embeddings=True,
+                                    )[0]
+                                    conn.execute(
+                                        "UPDATE raw_logs SET embedding = ?, embedding_model = ?, embedding_dim = ? WHERE id = ?",
+                                        (
+                                            vec.astype(np.float32).tobytes(),
+                                            current_model_name,
+                                            current_dim,
+                                            row_dict["id"],
+                                        ),
+                                    )
+                                except Exception:
+                                    continue
+
+                            if vec is not None:
+                                doc_vecs.append(vec)
+                                valid_rows.append(row_dict)
+
+                        conn.commit()
+
+                        if doc_vecs:
+                            doc_vecs = np.array(doc_vecs)
+                            scores = np.dot(doc_vecs, query_vec)
+                            for idx in np.argsort(scores)[::-1][: limit * 2]:
+                                score = float(scores[idx])
+                                # Use configurable threshold
+                                if score > semantic_threshold:
+                                    row = valid_rows[idx]
+                                    raw_found[row["id"]] = {
+                                        **raw_found.get(row["id"], row),
+                                        "semantic_score": score,
+                                    }
+                except Exception:
+                    pass  # Graceful degradation: return LIKE results only
+
+        # Pass 2.5: Apply Ebbinghaus decay and Emotion weighting (optional)
         for log_id, row in list(raw_found.items()):
-            decay_score = emotion_engine.calculate_decay_score(row)
-            row["decay_score"] = decay_score
-            # Final raw score = semantic score * decay score multiplier
-            # Multiply raw decay directly, to allow strong emotions to dominate
-            base_score = row.get(
-                "semantic_score", 0.5
-            )  # Give LIKE-only hits a base 0.5
-            row["final_hybrid_score"] = base_score * decay_score
+            if use_decay:
+                decay_score = emotion_engine.calculate_decay_score(row)
+                row["decay_score"] = decay_score
+                # Final raw score = semantic score * decay score multiplier
+                base_score = row.get(
+                    "semantic_score", 0.5
+                )  # Give LIKE-only hits a base 0.5
+                row["final_hybrid_score"] = base_score * decay_score
+            else:
+                # Skip decay, use semantic score directly (or 0.5 for LIKE-only)
+                row["decay_score"] = 1.0
+                row["final_hybrid_score"] = row.get("semantic_score", 0.5)
 
         merged = sorted(
             raw_found.values(),
