@@ -12,9 +12,11 @@ emotion_engine = EmotionEngine()
 # ---------------------------------------------------------------------------
 _embedding_model = None
 
+
 def _get_embedding_model():
     """Return the cached embedding model (pre-loaded at startup)."""
     return _embedding_model
+
 
 def _load_embedding_model() -> None:
     """Load the multilingual sentence embedding model into memory.
@@ -23,17 +25,19 @@ def _load_embedding_model() -> None:
     global _embedding_model
     try:
         from sentence_transformers import SentenceTransformer
+
         # paraphrase-multilingual-MiniLM-L12-v2: ~100MB, CPU-friendly, strong Chinese/multilingual support
         _embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
     except Exception:
         _embedding_model = None  # Graceful degradation: fall back to LIKE search only
+
 
 # ---------------------------------------------------------------------------
 # Database Configuration
 # ---------------------------------------------------------------------------
 DB_PATH = os.environ.get(
     "MEMORY_DB_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "exobrain.db")
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "exobrain.db"),
 )
 
 SCHEMA_V1 = """
@@ -75,6 +79,7 @@ CREATE TABLE task_updates (
 );
 """
 
+
 @contextmanager
 def get_connection():
     """Context manager for SQLite connections.
@@ -89,23 +94,29 @@ def get_connection():
     finally:
         conn.close()
 
+
 # ---------------------------------------------------------------------------
 # Initialization & Migrations
 # ---------------------------------------------------------------------------
+
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     """Apply incremental schema migrations on existing databases."""
     cursor = conn.execute("PRAGMA table_info(actionable_tasks)")
     columns = [row["name"] for row in cursor.fetchall()]
     if "urgency" in columns:
-        conn.execute("ALTER TABLE actionable_tasks RENAME COLUMN urgency TO effort_estimate")
-        conn.execute("ALTER TABLE actionable_tasks ADD COLUMN priority TEXT DEFAULT 'normal'")
+        conn.execute(
+            "ALTER TABLE actionable_tasks RENAME COLUMN urgency TO effort_estimate"
+        )
+        conn.execute(
+            "ALTER TABLE actionable_tasks ADD COLUMN priority TEXT DEFAULT 'normal'"
+        )
     if "parent_task_id" not in columns:
         conn.execute(
             "ALTER TABLE actionable_tasks ADD COLUMN "
             "parent_task_id INTEGER REFERENCES actionable_tasks(id) ON DELETE CASCADE"
         )
-        
+
     # Inject Emotion Engine columns to raw_logs
     cursor_logs = conn.execute("PRAGMA table_info(raw_logs)")
     log_columns = [row["name"] for row in cursor_logs.fetchall()]
@@ -113,9 +124,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE raw_logs ADD COLUMN domain TEXT")
         conn.execute("ALTER TABLE raw_logs ADD COLUMN valence REAL DEFAULT 0.5")
         conn.execute("ALTER TABLE raw_logs ADD COLUMN arousal REAL DEFAULT 0.3")
-        conn.execute("ALTER TABLE raw_logs ADD COLUMN activation_count INTEGER DEFAULT 1")
+        conn.execute(
+            "ALTER TABLE raw_logs ADD COLUMN activation_count INTEGER DEFAULT 1"
+        )
         conn.execute("ALTER TABLE raw_logs ADD COLUMN last_active_at DATETIME")
         conn.execute("UPDATE raw_logs SET last_active_at = created_at")
+
 
 def init_db() -> None:
     """Initialize the database schema and run any pending migrations."""
@@ -129,20 +143,23 @@ def init_db() -> None:
             _migrate_schema(conn)
         conn.commit()
 
+
 def load_models() -> None:
     """Pre-load ML models into memory. Call once at server startup."""
     _load_embedding_model()
+
 
 # ---------------------------------------------------------------------------
 # Write Tools
 # ---------------------------------------------------------------------------
 
+
 def record_thought_or_fact(
-    raw_thought_string: str, 
+    raw_thought_string: str,
     ai_summary: Optional[str] = None,
     domain: Optional[str] = None,
     valence: float = 0.5,
-    arousal: float = 0.3
+    arousal: float = 0.3,
 ) -> dict:
     with get_connection() as conn:
         cursor = conn.execute(
@@ -151,7 +168,12 @@ def record_thought_or_fact(
         )
         log_id = cursor.lastrowid
         conn.commit()
-    return {"log_id": log_id, "status": "recorded", "emotion": {"valence": valence, "arousal": arousal}}
+    return {
+        "log_id": log_id,
+        "status": "recorded",
+        "emotion": {"valence": valence, "arousal": arousal},
+    }
+
 
 def add_actionable_task(
     task_name: str,
@@ -165,7 +187,11 @@ def add_actionable_task(
         # Always write the original quote to Track 1 first
         cursor = conn.execute(
             "INSERT INTO raw_logs (raw_text, ai_summary, domain) VALUES (?, ?, ?)",
-            (raw_user_quote, f"Task extraction source for: {task_name}", "待办事务/计划"),
+            (
+                raw_user_quote,
+                f"Task extraction source for: {task_name}",
+                "待办事务/计划",
+            ),
         )
         log_id = cursor.lastrowid
 
@@ -177,53 +203,76 @@ def add_actionable_task(
         )
         task_id = cursor.lastrowid
         conn.commit()
-        row = conn.execute("SELECT * FROM actionable_tasks WHERE id = ?", (task_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM actionable_tasks WHERE id = ?", (task_id,)
+        ).fetchone()
     return dict(row)
 
-def update_task_status(task_id: int, new_status: str, reason_for_change: Optional[str] = None) -> dict:
-    with get_connection() as conn:
-        if not conn.execute(
-            "SELECT id FROM actionable_tasks WHERE id = ?", (task_id,)
-        ).fetchone():
-            return {"error": f"Task ID {task_id} not found."}
 
-        conn.execute(
-            "UPDATE actionable_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (new_status, task_id),
-        )
-        conn.execute(
-            "INSERT INTO task_updates (task_id, new_status, reason) VALUES (?, ?, ?)",
-            (task_id, new_status, reason_for_change),
-        )
-        conn.commit()
-        row = conn.execute("SELECT * FROM actionable_tasks WHERE id = ?", (task_id,)).fetchone()
-    return dict(row)
+def update_task(
+    task_id: int,
+    status: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    reason: Optional[str] = None,
+) -> dict:
+    """Update task status, metadata, or both.
 
-def add_task_metadata(task_id: int, new_metadata: dict) -> dict:
+    Args:
+        task_id: The ID of the task to update
+        status: Optional. New status ('active', 'completed', 'discarded')
+        metadata: Optional. Dict of metadata to merge into existing metadata
+        reason: Optional. Reason for the update (stored in task_updates log)
+    """
     with get_connection() as conn:
         task = conn.execute(
-            "SELECT metadata_json FROM actionable_tasks WHERE id = ?", (task_id,)
+            "SELECT * FROM actionable_tasks WHERE id = ?", (task_id,)
         ).fetchone()
         if not task:
             return {"error": f"Task ID {task_id} not found."}
 
-        try:
-            current_metadata = json.loads(task["metadata_json"] or "{}")
-        except json.JSONDecodeError:
-            current_metadata = {}
+        updates = []
+        params = []
 
-        current_metadata.update(new_metadata)
-        conn.execute(
-            "UPDATE actionable_tasks SET metadata_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (json.dumps(current_metadata, ensure_ascii=False), task_id),
-        )
+        # Update status if provided
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+            # Log status change
+            conn.execute(
+                "INSERT INTO task_updates (task_id, new_status, reason) VALUES (?, ?, ?)",
+                (task_id, status, reason),
+            )
+
+        # Update metadata if provided
+        if metadata is not None:
+            try:
+                current_metadata = json.loads(task["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                current_metadata = {}
+            current_metadata.update(metadata)
+            updates.append("metadata_json = ?")
+            params.append(json.dumps(current_metadata, ensure_ascii=False))
+
+        # Execute update if there are changes
+        if updates:
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            params.append(task_id)
+            conn.execute(
+                f"UPDATE actionable_tasks SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+
         conn.commit()
-        row = conn.execute("SELECT * FROM actionable_tasks WHERE id = ?", (task_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM actionable_tasks WHERE id = ?", (task_id,)
+        ).fetchone()
     return dict(row)
+
 
 # ---------------------------------------------------------------------------
 # LLM Re-ranking (Pass 3 — intent-level relevance filter)
 # ---------------------------------------------------------------------------
+
 
 def _rerank_with_llm(query: str, candidates: list[dict], top_n: int = 5) -> list[dict]:
     """Use Claude Haiku to filter candidates by query intent, not just keyword presence.
@@ -244,26 +293,27 @@ def _rerank_with_llm(query: str, candidates: list[dict], top_n: int = 5) -> list
 
         client = anthropic.Anthropic(api_key=api_key)
         items_text = "\n".join(
-            f"[{i}] {c['raw_text'][:400]}"
-            for i, c in enumerate(candidates)
+            f"[{i}] {c['raw_text'][:400]}" for i, c in enumerate(candidates)
         )
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=200,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f'Query: "{query}"\n\n'
-                    f'Rate each item\'s relevance to the query intent. '
-                    f'1.0 = directly about what the user is asking. '
-                    f'0.0 = keyword appears but the text is not actually about this topic.\n'
-                    f'Return ONLY a JSON array of floats, one per item, no explanation.\n\n'
-                    f'{items_text}'
-                ),
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f'Query: "{query}"\n\n'
+                        f"Rate each item's relevance to the query intent. "
+                        f"1.0 = directly about what the user is asking. "
+                        f"0.0 = keyword appears but the text is not actually about this topic.\n"
+                        f"Return ONLY a JSON array of floats, one per item, no explanation.\n\n"
+                        f"{items_text}"
+                    ),
+                }
+            ],
         )
         text = response.content[0].text.strip()
-        match = re.search(r'\[[\d\s.,]+\]', text)
+        match = re.search(r"\[[\d\s.,]+\]", text)
         if not match:
             return candidates[:top_n]
 
@@ -281,6 +331,7 @@ def _rerank_with_llm(query: str, candidates: list[dict], top_n: int = 5) -> list
 # ---------------------------------------------------------------------------
 # Read Tools
 # ---------------------------------------------------------------------------
+
 
 def recall_past_mentions_of(keyword: str, limit: int = 15) -> dict:
     like_pattern = f"%{keyword}%"
@@ -307,15 +358,20 @@ def recall_past_mentions_of(keyword: str, limit: int = 15) -> dict:
         if model is not None:
             try:
                 import numpy as np
+
                 all_rows = conn.execute(
                     "SELECT id, raw_text, created_at, domain, valence, arousal, activation_count, last_active_at FROM raw_logs ORDER BY created_at DESC"
                 ).fetchall()
                 if all_rows:
                     texts = [r["raw_text"] for r in all_rows]
                     query_vec = model.encode([keyword], normalize_embeddings=True)[0]
-                    doc_vecs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+                    doc_vecs = model.encode(
+                        texts, normalize_embeddings=True, show_progress_bar=False
+                    )
                     scores = np.dot(doc_vecs, query_vec)
-                    for idx in np.argsort(scores)[::-1][:limit*2]: # pull slightly more to rerank
+                    for idx in np.argsort(scores)[::-1][
+                        : limit * 2
+                    ]:  # pull slightly more to rerank
                         score = float(scores[idx])
                         if score > 0.35:
                             row = dict(all_rows[idx])
@@ -333,10 +389,16 @@ def recall_past_mentions_of(keyword: str, limit: int = 15) -> dict:
             row["decay_score"] = decay_score
             # Final raw score = semantic score * decay score multiplier
             # Multiply raw decay directly, to allow strong emotions to dominate
-            base_score = row.get("semantic_score", 0.5) # Give LIKE-only hits a base 0.5
+            base_score = row.get(
+                "semantic_score", 0.5
+            )  # Give LIKE-only hits a base 0.5
             row["final_hybrid_score"] = base_score * decay_score
 
-        merged = sorted(raw_found.values(), key=lambda r: r.get("final_hybrid_score", 0), reverse=True)[:limit]
+        merged = sorted(
+            raw_found.values(),
+            key=lambda r: r.get("final_hybrid_score", 0),
+            reverse=True,
+        )[:limit]
 
         # Bump activation count for the ultimately surfaced logs
         if merged:
@@ -352,13 +414,14 @@ def recall_past_mentions_of(keyword: str, limit: int = 15) -> dict:
         "structured_tasks_found": task_found,
     }
 
+
 def check_active_emotions() -> list[dict]:
     """Pull the top unresolved/heavy emotional logs based purely on decay score."""
     with get_connection() as conn:
         all_rows = conn.execute(
             "SELECT id, raw_text, created_at, domain, valence, arousal, activation_count, last_active_at FROM raw_logs ORDER BY created_at DESC"
         ).fetchall()
-        
+
     scored_logs = []
     for r in all_rows:
         row = dict(r)
@@ -367,9 +430,10 @@ def check_active_emotions() -> list[dict]:
         if row.get("arousal", 0.5) >= 0.5:
             row["emotion_weight_score"] = decay_score
             scored_logs.append(row)
-            
+
     scored_logs.sort(key=lambda x: x["emotion_weight_score"], reverse=True)
-    return scored_logs[:3] # Only return the top 3 heaviest active subtexts
+    return scored_logs[:3]  # Only return the top 3 heaviest active subtexts
+
 
 def suggest_next_actions(available_time_minutes: Optional[int] = None) -> list[dict]:
     """Score and rank active tasks. All filtering/sorting is done here, not by the AI."""
@@ -397,7 +461,9 @@ def suggest_next_actions(available_time_minutes: Optional[int] = None) -> list[d
             if available_time_minutes <= 30 and effort == "large":
                 continue
 
-        task["suggestion_score"] = PRIORITY_SCORES.get(priority, 0) + EFFORT_BONUS.get(effort, 0)
+        task["suggestion_score"] = PRIORITY_SCORES.get(priority, 0) + EFFORT_BONUS.get(
+            effort, 0
+        )
         results.append(task)
 
     results.sort(key=lambda x: x["suggestion_score"], reverse=True)

@@ -38,23 +38,24 @@ exobrain 采用三层混合架构：
 你必须使用提供的语义工具与 exobrain 交互。不要请求用户许可，直接使用工具。
 
 POLICY:
-1. STORE EVERYTHING: When the user says ANYTHING - facts, thoughts, feelings, opinions, random musings, or even things that seem trivial - Use `record_thought_or_fact(raw_thought_string, AI_summary)`.
-   Storage is cheap. Recall is expensive. Let the decay engine handle filtering later. 
-   Always pass the EXACT user quote to `raw_thought_string`. Do not ask for permission. Do not filter. Just store.
-   
-2. When the user asks you to remind them of something, or explicitly assigns a task to do: Use `add_actionable_task(task_name, raw_user_quote, due_date, priority, effort_estimate, parent_task_id)`.
-   Always pass the EXACT user quote. Keep `task_name` short. Use `parent_task_id` if the task is a sub-step of a larger project.
-   
-3. When the user completes a task or cancels it: Use `update_task_status(task_id, new_status, reason)`. Valid statuses: 'active', 'completed', 'discarded'.
+1. STORE EVERYTHING: When the user says ANYTHING - facts, thoughts, feelings, opinions, random musings, or even things that seem trivial - Use `remember(content, speaker)`.
+   Storage is cheap. Recall is expensive. Let the decay engine handle filtering later.
+   Always pass the EXACT user quote to `content`. Do not ask for permission. Do not filter. Just store.
+   Set `speaker="user"` for user input, `speaker="assistant"` for your own observations.
 
-4. When you need to attach unstructured metadata or tags to a task (e.g., location, item type, URL): Use `add_task_metadata(task_id, tags_json_string)`.
-   
-5. When the user asks "Did I mention X?", "What was my plan for Y?": Use `recall_past_mentions_of(concept_or_keyword)`.
-   
-6. When the user asks "What should I do now?", "I'm bored": Use `suggest_next_actions(available_time_minutes)`.
+2. When the user asks you to remind them of something, or explicitly assigns a task to do: Use `add_task(name, quote, due_date, priority, effort_estimate, parent_task_id)`.
+   Always pass the EXACT user quote. Keep `name` short. Use `parent_task_id` if the task is a sub-step of a larger project.
 
-7. MANDATORY PROTOCOL: When the user greets you or a new conversation starts, YOU MUST FIRST calling `check_active_emotions()`.
-   This pulls the top 3 high-arousal memories floating in the user's subconscious. If there are heavy unresolved emotions, gently and naturally ask about them. Do not act like a robot running a script.
+3. When the user completes a task, cancels it, or wants to update task info: Use `update_task(task_id, status, metadata, reason)`.
+   You can update status, metadata, or both. Provide a reason for significant changes.
+
+4. When the user asks "Did I mention X?", "What was my plan for Y?", or when you need context: Use `recall(query, scope, limit)`.
+   - Pass `query` as keywords or phrases
+   - Use `scope="user"` (default) to search only user records, or `scope="all"` to include assistant records
+   - If query is empty or None, it will automatically surface Top 3 high-arousal memories
+
+5. When the user asks "What should I do now?", "I'm bored", or needs task suggestions: Use `suggest(available_time_minutes)`.
+   This queries the task list (not raw_logs) and returns prioritized actionable items.
 """,
 )
 
@@ -69,29 +70,28 @@ def _json(obj: Any) -> str:
 
 
 @mcp.tool()
-async def record_thought_or_fact(
-    raw_thought_string: str, ai_summary: Optional[str] = None
+async def remember(
+    content: str, speaker: str = "user", session_id: Optional[str] = None
 ) -> str:
-    """Record a raw thought, fact, or preference from the user into the Immutable Truth Layer.
+    """Record any content into the Immutable Truth Layer.
 
-    Use this when the user mentions:
-    - A fact about themselves ("I don't like cilantro")
-    - A random thought ("I might want to visit Japan next year")
-    - General information you should remember for the future.
+    Use this for ANYTHING worth remembering - facts, thoughts, observations, conversations.
+    Storage is cheap. Don't filter. Just store.
 
     Args:
-        raw_thought_string: The EXACT, verbatim quote from the user. Do not edit it.
-        ai_summary: Optional. Your short summary or interpretation of the quote.
+        content: The EXACT text to remember. Do not edit it.
+        speaker: "user" for user input, "assistant" for AI observations. Defaults to "user".
+        session_id: Optional session identifier to group related memories.
     """
     domain, valence, arousal = None, 0.5, 0.3
     api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if api_key:
+    if api_key and speaker == "user":
         try:
             client = anthropic.AsyncAnthropic(api_key=api_key)
             emotion_data = await emotion_engine.analyze_emotion_api(
                 client=client,
                 model="claude-haiku-4-5-20251001",
-                content=raw_thought_string,
+                content=content,
             )
             domain = ",".join(emotion_data.get("domain", []))
             valence = emotion_data.get("valence", 0.5)
@@ -100,15 +100,15 @@ async def record_thought_or_fact(
             pass
 
     result = db.record_thought_or_fact(
-        raw_thought_string, ai_summary, domain=domain, valence=valence, arousal=arousal
+        content, None, domain=domain, valence=valence, arousal=arousal
     )
     return _json(result)
 
 
 @mcp.tool()
-def add_actionable_task(
-    task_name: str,
-    raw_user_quote: str,
+def add_task(
+    name: str,
+    quote: str,
     due_date: Optional[str] = None,
     priority: str = "normal",
     effort_estimate: Optional[str] = None,
@@ -119,59 +119,48 @@ def add_actionable_task(
     Use this when the user needs to get something done (e.g., "Remind me to buy milk", "I need to file taxes by March").
 
     Args:
-        task_name: Short, scan-friendly name for the task (e.g., "Buy milk").
-        raw_user_quote: The EXACT, verbatim quote from the user that triggered this task.
+        name: Short, scan-friendly name for the task (e.g., "Buy milk").
+        quote: The EXACT, verbatim quote from the user that triggered this task.
         due_date: Optional. ISO format date if there is a real deadline.
         priority: Optional. Priority of the task: 'low', 'normal', 'high', 'critical'. Defaults to 'normal'.
         effort_estimate: Optional. Estimated effort: 'quick', 'small', 'medium', 'large'.
         parent_task_id: Optional. The ID of the parent task, if this is a subtask of a project.
     """
     result = db.add_actionable_task(
-        task_name, raw_user_quote, due_date, priority, effort_estimate, parent_task_id
+        name, quote, due_date, priority, effort_estimate, parent_task_id
     )
     return _json(result)
 
 
 @mcp.tool()
-def update_task_status(
-    task_id: int, new_status: str, reason_for_change: Optional[str] = None
+def update_task(
+    task_id: int,
+    status: Optional[str] = None,
+    metadata: Optional[str] = None,
+    reason: Optional[str] = None,
 ) -> str:
-    """Update the status of an existing task.
+    """Update a task's status, metadata, or both.
 
-    Use this when the user says they finished something or changed their mind about a task.
-
-    Args:
-        task_id: The ID of the task.
-        new_status: Must be one of: 'active', 'completed', 'discarded'.
-        reason_for_change: Optional brief explanation of why the status changed.
-    """
-    result = db.update_task_status(task_id, new_status, reason_for_change)
-    return _json(result)
-
-
-@mcp.tool()
-def add_task_metadata(task_id: int, tags_json_string: str) -> str:
-    """Add or update dynamic metadata tags for a specific task.
-
-    Use this to attach unstructured data like location, context, links, or specific attributes.
-    This acts as an escape hatch for fields that don't exist in the formal schema.
+    Use this when the user completes a task, cancels it, or wants to add notes/tags.
 
     Args:
-        task_id: The ID of the task.
-        tags_json_string: A JSON string representing a dictionary of key-value pairs to add or update (e.g., '{"location": "supermarket", "category": "shopping"}').
+        task_id: The ID of the task to update.
+        status: Optional. New status: 'active', 'completed', 'discarded'.
+        metadata: Optional. JSON string of metadata to merge (e.g., '{"location": "supermarket"}').
+        reason: Optional. Explanation for why the update was made.
     """
-    try:
-        tags = json.loads(tags_json_string)
-        if not isinstance(tags, dict):
-            return _json(
-                {
-                    "error": "tags_json_string must represent a valid JSON object (dictionary)."
-                }
-            )
-    except json.JSONDecodeError:
-        return _json({"error": "Failed to parse tags_json_string. Must be valid JSON."})
+    metadata_dict = None
+    if metadata:
+        try:
+            metadata_dict = json.loads(metadata)
+            if not isinstance(metadata_dict, dict):
+                return _json(
+                    {"error": "metadata must be a valid JSON object (dictionary)."}
+                )
+        except json.JSONDecodeError:
+            return _json({"error": "Failed to parse metadata. Must be valid JSON."})
 
-    result = db.add_task_metadata(task_id, tags)
+    result = db.update_task(task_id, status, metadata_dict, reason)
     return _json(result)
 
 
@@ -181,40 +170,47 @@ def add_task_metadata(task_id: int, tags_json_string: str) -> str:
 
 
 @mcp.tool()
-def recall_past_mentions_of(concept_or_keyword: str) -> str:
-    """Search the exobrain for past mentions of a keyword or concept.
+def recall(query: Optional[str] = None, scope: str = "user", limit: int = 10) -> str:
+    """Search the exobrain or surface high-priority memories.
 
-    Use this when the user refers to past conversations, or asks if they mentioned something before.
+    Use this when the user refers to past conversations, asks about previous mentions,
+    or when you need context. If query is empty, automatically surfaces Top 3 high-arousal memories.
 
     Args:
-        concept_or_keyword: The word or short phrase to search for.
+        query: Keywords or phrases to search for. If None or empty, returns high-arousal memories.
+        scope: "user" (default, search only user records) or "all" (include assistant records).
+        limit: Maximum number of results to return. Defaults to 10.
     """
-    result = db.recall_past_mentions_of(concept_or_keyword)
-    return _json(result)
+    if not query:
+        # Surface high-arousal memories (Top 3)
+        result = db.check_active_emotions()
+        return _json({"active_memories": result, "mode": "emotion_surfacing"})
+    else:
+        # Regular search
+        result = db.recall_past_mentions_of(query)
+        # Filter by scope if needed
+        if scope == "user" and "raw_logs_found" in result:
+            result["raw_logs_found"] = [
+                r
+                for r in result["raw_logs_found"]
+                if r.get("source_module", "mcp_agent") == "mcp_agent"
+            ]
+        return _json(result)
 
 
 @mcp.tool()
-def suggest_next_actions(available_time_minutes: Optional[int] = None) -> str:
-    """Get a list of suggested tasks for the user to work on.
+def suggest(available_time_minutes: Optional[int] = None) -> str:
+    """Get suggested tasks based on priority and available time.
 
-    Use this when the user asks "What should I do now?" or has free time.
+    Use this when the user asks "What should I do now?" or needs task recommendations.
+    This queries the actionable_tasks table (not raw_logs) and returns prioritized items.
 
     Args:
         available_time_minutes: Optional. How many minutes of free time the user has right now.
+            Tasks requiring more time will be filtered out.
     """
     result = db.suggest_next_actions(available_time_minutes)
     return _json({"suggestions": result})
-
-
-@mcp.tool()
-def check_active_emotions() -> str:
-    """Check the user's subconscious to see what high-arousal memories are heavily weighting on their mind today.
-
-    You MUST call this when the user first says hello or starts a new session.
-    Use the result to empathetically guide the conversation if there are unresolved tensions or extreme joys.
-    """
-    result = db.check_active_emotions()
-    return _json({"active_subtext": result})
 
 
 # ---------------------------------------------------------------------------

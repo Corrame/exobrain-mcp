@@ -17,17 +17,15 @@
 
 ## 🛠 给 AI 的高内聚语义工具 (MCP Tools)
 
-本系统暴露了对大模型极其友好的 **7 个**函数接口，大幅降低 AI 操作数据库的认知负担（无需写 SQL）：
+本系统暴露了对大模型极其友好的 **5 个**函数接口，大幅降低 AI 操作数据库的认知负担（无需写 SQL）：
 
 | 工具 | 功能 |
 |---|---|
-| `record_thought_or_fact` | 记录随想、偏好或事实到轨一，**自动分析情感坐标**（Valence/Arousal）和主题域 |
-| `add_actionable_task` | 捕获交办指令，自动录入轨一并映射为轨二待办任务，支持**任务树层级**（`parent_task_id`）、**优先级**（`priority`）和**工作量评估**（`effort_estimate`） |
-| `update_task_status` | 更新任务进度（完成/废弃）并记录变更原因 |
-| `add_task_metadata` | 为任务动态附加无限扩展的 JSON 标签（无需修改数据库结构） |
-| `recall_past_mentions_of` | **混合检索**：关键词匹配 + 语义向量搜索 + **情感权重排序**，高唤醒度记忆优先浮现 |
-| `suggest_next_actions` | 后端算法自动按优先级打分、按空闲时间过滤，返回精准的下一步行动建议 |
-| `check_active_emotions` | **会话开始时调用**：自动浮现当前权重最高的 **Top 3** 高唤醒度记忆，让 AI 主动关心你未解决的情绪 |
+| `remember` | **存一切**——用户原话、AI观察、任何文本，**自动分析情感坐标**（Valence/Arousal）和主题域 |
+| `add_task` | 捕获交办指令，自动录入轨一并映射为轨二待办任务，支持**任务树层级**（`parent_task_id`）、**优先级**（`priority`）和**工作量评估**（`effort_estimate`） |
+| `update_task` | 更新任务进度（完成/废弃）、附加元数据标签，或两者同时进行 |
+| `recall` | **混合检索**：关键词匹配 + 语义向量搜索 + **情感权重排序**。如果 query 为空，自动浮现当前权重最高的 **Top 3** 高唤醒度记忆 |
+| `suggest` | 查询待办任务，后端算法自动按优先级打分、按空闲时间过滤，返回精准的下一步行动建议 |
 
 ---
 
@@ -58,7 +56,7 @@
 Score = Importance × (Activation_Count^0.3) × Time_Decay × (Base + Arousal² × Boost)
 ```
 
-- 高唤醒度记忆衰减慢，更容易被 `check_active_emotions()` 在对话开头浮现
+- 高唤醒度记忆衰减慢，更容易被 `recall()` （空 query）在对话开头浮现
 - 激活次数越多的记忆越难忘（被反复提起的事情记得更牢）
 
 ---
