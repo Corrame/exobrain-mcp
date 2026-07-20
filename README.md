@@ -140,7 +140,7 @@ Score = Importance × (Activation_Count^0.3) × Time_Decay × (Base + Arousal² 
 
 #### 方案 1：快速开始（单机使用）
 ```bash
-git clone https://github.com/Corrame/exobrain-mcp.git
+git clone https://github.com/HomuraTokido/exobrain-mcp.git
 cd exobrain-mcp
 # 直接运行，数据库自动创建在项目目录下
 # .gitignore 已屏蔽 *.db，不会误提交
