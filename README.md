@@ -1,5 +1,12 @@
 # Personal AI Cognitive Exobrain (MCP) 🧠
 
+> 状态：核心产品语义已由 HPlugin 吸收，本仓保留为历史实现来源。
+>
+> HPlugin Memory 现已提供显式的时间、Valence 与 Arousal 条件召回；Htodo 现已提供受控的
+> Priority/Effort 规划，以及按可用时间给出确定性任务建议。HPlugin 没有复制本仓的“自动记录
+> 一切”、裸 SQL、外部 LLM 情绪标注或调用时全表 embedding 路线。当前仓库内未发现需要迁移的
+> SQLite 或 `.env` 数据；是否归档由 Owner 另行确认。
+
 这是一个基于 **Model Context Protocol (MCP)** 的个人认知外脑服务器。它能为你的大语言模型（如 Claude Desktop、Cursor、VS Code 插件等）赋予**长期的、结构化的、带情感坐标的真实记忆**。
 
 ## 🌟 为什么需要它？（痛点直击）
